@@ -1,5 +1,6 @@
-<img width="521" height="296" alt="image" src="https://github.com/user-attachments/assets/59dab560-de2e-4a40-87db-0ebb01a0248a" /># Lightning-Manager
-Lighting Manager is a Fast and lightweight mod manager for Minecraft. This isn't a client, but rather an application that is dependent on the Minecraft Launcher and is used to easily manage Minecraft Launcher and how you would manually install Minecraft Mods for Minecraft: Java Edition. 
+# Lightning Manager
+
+Lightning Manager is a Fast and lightweight mod manager for Minecraft. This isn't a client, but rather an application that is dependent on the Minecraft Launcher and is used to easily manage Minecraft Launcher and how you would manually install Minecraft Mods for Minecraft: Java Edition. 
 
 ## What this application offers
 
