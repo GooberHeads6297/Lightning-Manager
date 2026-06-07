@@ -1,0 +1,27 @@
+[package]
+name = "minecraft-mod-manager"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "Lightning-Manager"
+path = "src/main.rs"
+
+[profile.release]
+# opt-level=0 is the only level that works from a clean build;
+# higher levels trigger an LLVM codegen bug (0xC0000005) in MinGW startup.
+opt-level = 0
+lto = "thin"
+strip = "symbols"
+codegen-units = 1
+
+[dependencies]
+eframe = "0.31"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+zip = "2"
+rfd = "0.17"
+
+[build-dependencies]
