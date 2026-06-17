@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
 use std::fs;
-use std::process::Command;
 use std::os::windows::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::ptr;
 
 #[link(name = "shell32")]
@@ -16,7 +16,6 @@ extern "system" {
     ) -> isize;
 }
 
-
 pub fn minecraft_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from(r"C:\Users\Default\AppData\Roaming"))
@@ -25,6 +24,92 @@ pub fn minecraft_dir() -> PathBuf {
 
 pub fn mods_dir() -> PathBuf {
     minecraft_dir().join("mods")
+}
+
+pub fn bedrock_default_dir() -> PathBuf {
+    bedrock_roaming_dir()
+}
+
+fn bedrock_roaming_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from(r"C:\Users\Default\AppData\Roaming"))
+        .join("Minecraft Bedrock")
+        .join("Users")
+        .join("Shared")
+        .join("games")
+        .join("com.mojang")
+}
+
+fn bedrock_package_dir(package: &str) -> Option<PathBuf> {
+    Some(
+        dirs::data_local_dir()?
+            .join("Packages")
+            .join(package)
+            .join("LocalState")
+            .join("games")
+            .join("com.mojang"),
+    )
+}
+
+pub fn find_bedrock_dir() -> Option<PathBuf> {
+    let roaming = bedrock_roaming_dir();
+    if roaming.exists() {
+        return Some(roaming);
+    }
+
+    let local = dirs::data_local_dir()?;
+    let packages = local.join("Packages");
+    let known_packages = [
+        "Microsoft.MinecraftUWP_8wekyb3d8bbwe",
+        "Microsoft.MinecraftWindowsBeta_8wekyb3d8bbwe",
+    ];
+
+    for package in known_packages {
+        if let Some(dir) = bedrock_package_dir(package) {
+            if dir.exists() {
+                return Some(dir);
+            }
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir(&packages) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if name.contains("minecraft") {
+                let dir = entry
+                    .path()
+                    .join("LocalState")
+                    .join("games")
+                    .join("com.mojang");
+                if dir.exists() {
+                    return Some(dir);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+pub fn bedrock_dir(custom_path: Option<&str>) -> PathBuf {
+    if let Some(path) = custom_path {
+        if !path.trim().is_empty() {
+            return PathBuf::from(path.trim());
+        }
+    }
+    find_bedrock_dir().unwrap_or_else(bedrock_default_dir)
+}
+
+pub fn bedrock_behavior_packs_dir(custom_path: Option<&str>) -> PathBuf {
+    bedrock_dir(custom_path).join("behavior_packs")
+}
+
+pub fn bedrock_resource_packs_dir(custom_path: Option<&str>) -> PathBuf {
+    bedrock_dir(custom_path).join("resource_packs")
+}
+
+pub fn bedrock_backup_dir(custom_path: Option<&str>) -> PathBuf {
+    bedrock_dir(custom_path).join("lightning_packs_backup")
 }
 
 pub fn profiles_path() -> PathBuf {
@@ -52,6 +137,12 @@ fn ensure_mods_dir() -> std::io::Result<()> {
     if !dir.exists() {
         fs::create_dir_all(&dir)?;
     }
+    Ok(())
+}
+
+fn ensure_bedrock_pack_dirs(custom_path: Option<&str>) -> std::io::Result<()> {
+    fs::create_dir_all(bedrock_behavior_packs_dir(custom_path))?;
+    fs::create_dir_all(bedrock_resource_packs_dir(custom_path))?;
     Ok(())
 }
 
@@ -83,8 +174,35 @@ pub fn delete_mod(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+pub fn delete_entry_path(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else if path.exists() {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
 pub fn open_mods_folder() -> std::io::Result<()> {
     open_folder(&mods_dir())
+}
+
+pub fn open_bedrock_folder(custom_path: Option<&str>) -> std::io::Result<()> {
+    let path = bedrock_dir(custom_path);
+    fs::create_dir_all(&path)?;
+    open_folder(&path)
+}
+
+pub fn open_bedrock_behavior_packs_folder(custom_path: Option<&str>) -> std::io::Result<()> {
+    let path = bedrock_behavior_packs_dir(custom_path);
+    fs::create_dir_all(&path)?;
+    open_folder(&path)
+}
+
+pub fn open_bedrock_resource_packs_folder(custom_path: Option<&str>) -> std::io::Result<()> {
+    let path = bedrock_resource_packs_dir(custom_path);
+    fs::create_dir_all(&path)?;
+    open_folder(&path)
 }
 
 pub fn open_folder(path: &Path) -> std::io::Result<()> {
@@ -95,10 +213,21 @@ pub fn open_folder(path: &Path) -> std::io::Result<()> {
     } else {
         path.to_path_buf()
     };
-    let dir_wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let dir_wide: Vec<u16> = dir
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let operation: Vec<u16> = "open\0".encode_utf16().collect();
     let result = unsafe {
-        ShellExecuteW(0, operation.as_ptr(), dir_wide.as_ptr(), ptr::null(), ptr::null(), 5)
+        ShellExecuteW(
+            0,
+            operation.as_ptr(),
+            dir_wide.as_ptr(),
+            ptr::null(),
+            ptr::null(),
+            5,
+        )
     };
     if result as isize <= 32 {
         return Err(std::io::Error::last_os_error());
@@ -150,7 +279,14 @@ pub fn launch_minecraft() -> std::io::Result<()> {
         let uri_wide: Vec<u16> = "minecraft:\0".encode_utf16().collect();
         let operation: Vec<u16> = "open\0".encode_utf16().collect();
         let result = unsafe {
-            ShellExecuteW(0, operation.as_ptr(), uri_wide.as_ptr(), ptr::null(), ptr::null(), 5)
+            ShellExecuteW(
+                0,
+                operation.as_ptr(),
+                uri_wide.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                5,
+            )
         };
         if result as isize <= 32 {
             return Err(std::io::Error::last_os_error());
@@ -192,8 +328,7 @@ pub fn backup_mods(mods: &[ModEntry]) -> Result<String, String> {
     let base = backup_dir();
     let timestamp = chrono_now_string();
     let backup_path = base.join(&timestamp);
-    fs::create_dir_all(&backup_path)
-        .map_err(|e| format!("Failed to create backup dir: {e}"))?;
+    fs::create_dir_all(&backup_path).map_err(|e| format!("Failed to create backup dir: {e}"))?;
 
     for mod_entry in mods {
         let dest = backup_path.join(&mod_entry.name);
@@ -204,8 +339,59 @@ pub fn backup_mods(mods: &[ModEntry]) -> Result<String, String> {
     Ok(backup_path.to_string_lossy().to_string())
 }
 
+pub fn backup_bedrock_packs(
+    packs: &[BedrockPackEntry],
+    custom_path: Option<&str>,
+) -> Result<String, String> {
+    let base = bedrock_backup_dir(custom_path);
+    let timestamp = chrono_now_string();
+    let backup_path = base.join(&timestamp);
+    fs::create_dir_all(&backup_path).map_err(|e| format!("Failed to create backup dir: {e}"))?;
+
+    for pack in packs {
+        let kind_dir = backup_path.join(pack.kind.folder_name());
+        fs::create_dir_all(&kind_dir)
+            .map_err(|e| format!("Failed to create backup category: {e}"))?;
+        let dest = kind_dir.join(&pack.name);
+        copy_path_recursive(&pack.path, &dest)
+            .map_err(|e| format!("Failed to back up {}: {e}", pack.name))?;
+    }
+
+    Ok(backup_path.to_string_lossy().to_string())
+}
+
+fn copy_path_recursive(source: &Path, dest: &Path) -> std::io::Result<()> {
+    if source.is_dir() {
+        fs::create_dir_all(dest)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            copy_path_recursive(&entry.path(), &dest.join(entry.file_name()))?;
+        }
+    } else {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(source, dest)?;
+    }
+    Ok(())
+}
+
 pub fn clear_backups() -> Result<usize, String> {
     let dir = backup_dir();
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let count = fs::read_dir(&dir)
+        .map_err(|e| format!("Failed to read backup dir: {e}"))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .count();
+    fs::remove_dir_all(&dir).map_err(|e| format!("Failed to clear backups: {e}"))?;
+    Ok(count)
+}
+
+pub fn clear_bedrock_backups(custom_path: Option<&str>) -> Result<usize, String> {
+    let dir = bedrock_backup_dir(custom_path);
     if !dir.exists() {
         return Ok(0);
     }
@@ -258,6 +444,136 @@ pub struct ModEntry {
     pub modified: Option<std::time::SystemTime>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BedrockPackKind {
+    Behavior,
+    Resource,
+}
+
+impl BedrockPackKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Behavior => "Behavior Pack",
+            Self::Resource => "Resource Pack",
+        }
+    }
+
+    fn folder_name(self) -> &'static str {
+        match self {
+            Self::Behavior => "behavior_packs",
+            Self::Resource => "resource_packs",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BedrockPackEntry {
+    pub name: String,
+    pub display_name: String,
+    pub path: PathBuf,
+    pub size: u64,
+    pub modified: Option<std::time::SystemTime>,
+    pub kind: BedrockPackKind,
+    pub is_folder: bool,
+}
+
+impl BedrockPackEntry {
+    pub fn selection_id(&self) -> String {
+        format!("{}:{}", self.kind.folder_name(), self.name)
+    }
+}
+
+pub fn list_bedrock_packs(custom_path: Option<&str>) -> std::io::Result<Vec<BedrockPackEntry>> {
+    ensure_bedrock_pack_dirs(custom_path)?;
+    let mut packs = Vec::new();
+    collect_bedrock_packs(
+        &bedrock_behavior_packs_dir(custom_path),
+        BedrockPackKind::Behavior,
+        &mut packs,
+    )?;
+    collect_bedrock_packs(
+        &bedrock_resource_packs_dir(custom_path),
+        BedrockPackKind::Resource,
+        &mut packs,
+    )?;
+    packs.sort_by(|a, b| {
+        a.kind
+            .folder_name()
+            .cmp(b.kind.folder_name())
+            .then_with(|| a.display_name.cmp(&b.display_name))
+    });
+    Ok(packs)
+}
+
+fn collect_bedrock_packs(
+    dir: &Path,
+    kind: BedrockPackKind,
+    packs: &mut Vec<BedrockPackEntry>,
+) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::metadata(&path)?;
+        let is_folder = metadata.is_dir();
+        let is_pack_file = path.extension().map_or(false, |e| {
+            let ext = e.to_string_lossy().to_lowercase();
+            ext == "mcpack" || ext == "mcaddon" || ext == "zip"
+        });
+
+        if !is_folder && !is_pack_file {
+            continue;
+        }
+
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let display_name = read_bedrock_manifest_name(&path).unwrap_or_else(|| name.clone());
+        let size = if is_folder {
+            folder_size(&path).unwrap_or(0)
+        } else {
+            metadata.len()
+        };
+
+        packs.push(BedrockPackEntry {
+            name,
+            display_name,
+            path,
+            size,
+            modified: metadata.modified().ok(),
+            kind,
+            is_folder,
+        });
+    }
+    Ok(())
+}
+
+fn read_bedrock_manifest_name(path: &Path) -> Option<String> {
+    let manifest_path = path.join("manifest.json");
+    let content = fs::read_to_string(manifest_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    json.get("header")
+        .and_then(|h| h.get("name"))
+        .and_then(|n| n.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string())
+}
+
+fn folder_size(path: &Path) -> std::io::Result<u64> {
+    let mut size = 0;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = fs::metadata(entry.path())?;
+        if metadata.is_dir() {
+            size += folder_size(&entry.path())?;
+        } else {
+            size += metadata.len();
+        }
+    }
+    Ok(size)
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LauncherProfile {
     #[serde(default)]
@@ -291,9 +607,12 @@ pub fn read_profiles() -> Result<LauncherProfiles, String> {
             selectedProfile: None,
         });
     }
-    let content =
-        fs::read_to_string(&path).map_err(|e| format!("Failed to read profiles: {e}"))?;
-    serde_json::from_str(&content).map_err(|e| format!("Failed to parse profiles: {e}"))
+    let content = fs::read_to_string(&path).map_err(|e| format!("Failed to read profiles: {e}"))?;
+    let mut data: LauncherProfiles =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse profiles: {e}"))?;
+    data.profiles
+        .retain(|key, _| key != "latest-release" && key != "latest-snapshot");
+    Ok(data)
 }
 
 pub fn save_profiles(profiles: &LauncherProfiles) -> Result<(), String> {
@@ -318,6 +637,8 @@ pub struct AppConfig {
     pub custom_launcher_path: String,
     #[serde(default = "default_logging_enabled")]
     pub logging_enabled: bool,
+    #[serde(default)]
+    pub custom_bedrock_path: String,
 }
 
 const fn default_logging_enabled() -> bool {
@@ -329,6 +650,7 @@ impl Default for AppConfig {
         Self {
             custom_launcher_path: String::new(),
             logging_enabled: true,
+            custom_bedrock_path: String::new(),
         }
     }
 }
@@ -436,9 +758,10 @@ fn is_rule_allowed(rules: &[RuleDef]) -> bool {
     let mut allowed = true;
     for rule in rules {
         let os_match = match &rule.os {
-            Some(os) => os.name.as_deref().map_or(true, |name| {
-                name.eq_ignore_ascii_case("windows")
-            }),
+            Some(os) => os
+                .name
+                .as_deref()
+                .map_or(true, |name| name.eq_ignore_ascii_case("windows")),
             None => true,
         };
         if os_match {
@@ -485,14 +808,26 @@ fn library_to_path(lib: &LibraryDef) -> Option<PathBuf> {
     let group = parts[0].replace('.', "/");
     let artifact = parts[1];
     let version = parts[2];
-    let classifier = if parts.len() > 3 { Some(parts[3]) } else { None };
+    let classifier = if parts.len() > 3 {
+        Some(parts[3])
+    } else {
+        None
+    };
 
     let filename = match classifier {
         Some(cls) => format!("{artifact}-{version}-{cls}.jar"),
         None => format!("{artifact}-{version}.jar"),
     };
-    let p = libraries_dir().join(&group).join(artifact).join(version).join(&filename);
-    if p.exists() { Some(p) } else { None }
+    let p = libraries_dir()
+        .join(&group)
+        .join(artifact)
+        .join(version)
+        .join(&filename);
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 fn resolve_classpath_string(manifest: &VersionManifest) -> String {
@@ -503,11 +838,17 @@ fn resolve_classpath_string(manifest: &VersionManifest) -> String {
         }
     }
     if let Some(version_id) = &manifest.id {
-        let version_jar = minecraft_dir().join("versions").join(version_id).join(format!("{version_id}.jar"));
+        let version_jar = minecraft_dir()
+            .join("versions")
+            .join(version_id)
+            .join(format!("{version_id}.jar"));
         if version_jar.exists() {
             paths.push(version_jar.to_string_lossy().to_string());
         } else if let Some(ref parent_id) = manifest.inherits_from {
-            let parent_jar = minecraft_dir().join("versions").join(parent_id).join(format!("{parent_id}.jar"));
+            let parent_jar = minecraft_dir()
+                .join("versions")
+                .join(parent_id)
+                .join(format!("{parent_id}.jar"));
             if parent_jar.exists() {
                 paths.push(parent_jar.to_string_lossy().to_string());
             }
@@ -549,7 +890,8 @@ fn extract_natives(native_jars: &[PathBuf], target_dir: &Path) -> Result<(), Str
     fs::create_dir_all(target_dir).map_err(|e| format!("Failed to create natives dir: {e}"))?;
 
     for jar_path in native_jars {
-        let file = fs::File::open(jar_path).map_err(|e| format!("Failed to open {}: {e}", jar_path.display()))?;
+        let file = fs::File::open(jar_path)
+            .map_err(|e| format!("Failed to open {}: {e}", jar_path.display()))?;
         let mut archive = zip::ZipArchive::new(file)
             .map_err(|e| format!("Failed to read zip {}: {e}", jar_path.display()))?;
 
@@ -561,7 +903,9 @@ fn extract_natives(native_jars: &[PathBuf], target_dir: &Path) -> Result<(), Str
             let name = entry.name().to_string();
             let is_dir = entry.is_dir();
 
-            if !is_dir && (name.ends_with(".dll") || name.ends_with(".so") || name.ends_with(".dylib")) {
+            if !is_dir
+                && (name.ends_with(".dll") || name.ends_with(".so") || name.ends_with(".dylib"))
+            {
                 let out_path = target_dir.join(&name);
                 if let Some(parent) = out_path.parent() {
                     let _ = fs::create_dir_all(parent);
@@ -575,10 +919,17 @@ fn extract_natives(native_jars: &[PathBuf], target_dir: &Path) -> Result<(), Str
     Ok(())
 }
 
-fn replace_placeholders(input: &str, username: &str, token: &str, uuid: &str,
-    game_dir: &str, assets_root: &str, asset_index: &str,
-    version_name: &str, version_type: &str) -> String
-{
+fn replace_placeholders(
+    input: &str,
+    username: &str,
+    token: &str,
+    uuid: &str,
+    game_dir: &str,
+    assets_root: &str,
+    asset_index: &str,
+    version_name: &str,
+    version_type: &str,
+) -> String {
     input
         .replace("${auth_player_name}", username)
         .replace("${auth_access_token}", token)
@@ -598,18 +949,36 @@ fn replace_placeholders(input: &str, username: &str, token: &str, uuid: &str,
         .replace("${launcher_version}", "0.1.0")
 }
 
-fn resolve_placeholder_arg(val: &serde_json::Value, username: &str, token: &str, uuid: &str,
-    game_dir: &str, assets_root: &str, asset_index: &str,
-    version_name: &str, version_type: &str) -> Option<String>
-{
+fn resolve_placeholder_arg(
+    val: &serde_json::Value,
+    username: &str,
+    token: &str,
+    uuid: &str,
+    game_dir: &str,
+    assets_root: &str,
+    asset_index: &str,
+    version_name: &str,
+    version_type: &str,
+) -> Option<String> {
     match val {
-        serde_json::Value::String(s) => {
-            Some(replace_placeholders(s, username, token, uuid, game_dir, assets_root, asset_index, version_name, version_type))
-        }
+        serde_json::Value::String(s) => Some(replace_placeholders(
+            s,
+            username,
+            token,
+            uuid,
+            game_dir,
+            assets_root,
+            asset_index,
+            version_name,
+            version_type,
+        )),
         serde_json::Value::Object(obj) => {
             let mut result = None;
             if let Some(rules) = obj.get("rules").and_then(|r| r.as_array()) {
-                let rules_parsed: Vec<RuleDef> = rules.iter().filter_map(|r| serde_json::from_value(r.clone()).ok()).collect();
+                let rules_parsed: Vec<RuleDef> = rules
+                    .iter()
+                    .filter_map(|r| serde_json::from_value(r.clone()).ok())
+                    .collect();
                 if !rules_parsed.is_empty() && !is_rule_allowed(&rules_parsed) {
                     return None;
                 }
@@ -617,13 +986,33 @@ fn resolve_placeholder_arg(val: &serde_json::Value, username: &str, token: &str,
             if let Some(value) = obj.get("value") {
                 match value {
                     serde_json::Value::String(s) => {
-                        result = Some(replace_placeholders(s, username, token, uuid, game_dir, assets_root, asset_index, version_name, version_type));
+                        result = Some(replace_placeholders(
+                            s,
+                            username,
+                            token,
+                            uuid,
+                            game_dir,
+                            assets_root,
+                            asset_index,
+                            version_name,
+                            version_type,
+                        ));
                     }
                     serde_json::Value::Array(arr) => {
                         let mut parts = Vec::new();
                         for v in arr {
                             if let serde_json::Value::String(s) = v {
-                                parts.push(replace_placeholders(s, username, token, uuid, game_dir, assets_root, asset_index, version_name, version_type));
+                                parts.push(replace_placeholders(
+                                    s,
+                                    username,
+                                    token,
+                                    uuid,
+                                    game_dir,
+                                    assets_root,
+                                    asset_index,
+                                    version_name,
+                                    version_type,
+                                ));
                             }
                         }
                         if !parts.is_empty() {
@@ -640,8 +1029,11 @@ fn resolve_placeholder_arg(val: &serde_json::Value, username: &str, token: &str,
 }
 
 pub fn read_version_manifest(version_id: &str) -> Result<VersionManifest, String> {
-    let path = versions_dir().join(version_id).join(format!("{version_id}.json"));
-    let content = fs::read_to_string(&path).map_err(|e| format!("Failed to read version manifest: {e}"))?;
+    let path = versions_dir()
+        .join(version_id)
+        .join(format!("{version_id}.json"));
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("Failed to read version manifest: {e}"))?;
     let mut manifest: VersionManifest = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse version manifest: {e}"))?;
 
@@ -685,17 +1077,32 @@ pub fn read_version_manifest(version_id: &str) -> Result<VersionManifest, String
 
 pub fn read_auth_data() -> Result<(String, String, String), String> {
     let path = profiles_path();
-    let content = fs::read_to_string(&path).map_err(|e| format!("Failed to read auth data: {e}"))?;
-    let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| format!("Failed to parse auth data: {e}"))?;
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("Failed to read auth data: {e}"))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse auth data: {e}"))?;
 
     if let Some(selected_user) = json.get("selectedUser") {
-        let account_uuid = selected_user.get("account").and_then(|v| v.as_str()).unwrap_or("");
+        let account_uuid = selected_user
+            .get("account")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if let Some(auth_db) = json.get("authenticationDatabase") {
             if let Some(account) = auth_db.get(account_uuid) {
-                let username = account.get("displayName").and_then(|v| v.as_str()).unwrap_or("Player");
-                let access_token = account.get("accessToken").and_then(|v| v.as_str()).unwrap_or("0");
+                let username = account
+                    .get("displayName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Player");
+                let access_token = account
+                    .get("accessToken")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0");
                 let uuid = account.get("uuid").and_then(|v| v.as_str()).unwrap_or("0");
-                return Ok((username.to_string(), access_token.to_string(), uuid.to_string()));
+                return Ok((
+                    username.to_string(),
+                    access_token.to_string(),
+                    uuid.to_string(),
+                ));
             }
         }
     }
@@ -710,29 +1117,45 @@ pub fn find_java(java_dir: &Option<String>) -> Result<PathBuf, String> {
             return Ok(p);
         }
         let exe = p.join("bin").join("javaw.exe");
-        if exe.exists() { return Ok(exe); }
+        if exe.exists() {
+            return Ok(exe);
+        }
         let exe = p.join("bin").join("java.exe");
-        if exe.exists() { return Ok(exe); }
+        if exe.exists() {
+            return Ok(exe);
+        }
         let exe = p.join("javaw.exe");
-        if exe.exists() { return Ok(exe); }
+        if exe.exists() {
+            return Ok(exe);
+        }
         let exe = p.join("java.exe");
-        if exe.exists() { return Ok(exe); }
+        if exe.exists() {
+            return Ok(exe);
+        }
     }
 
     if let Ok(java_home) = std::env::var("JAVA_HOME") {
         let home = PathBuf::from(&java_home);
         let exe = home.join("bin").join("javaw.exe");
-        if exe.exists() { return Ok(exe); }
+        if exe.exists() {
+            return Ok(exe);
+        }
         let exe = home.join("bin").join("java.exe");
-        if exe.exists() { return Ok(exe); }
+        if exe.exists() {
+            return Ok(exe);
+        }
     }
 
     if let Ok(paths) = std::env::var("PATH") {
         for dir in paths.split(';') {
             let exe = PathBuf::from(dir).join("javaw.exe");
-            if exe.exists() { return Ok(exe); }
+            if exe.exists() {
+                return Ok(exe);
+            }
             let exe = PathBuf::from(dir).join("java.exe");
-            if exe.exists() { return Ok(exe); }
+            if exe.exists() {
+                return Ok(exe);
+            }
         }
     }
 
@@ -759,14 +1182,24 @@ pub fn launch_profile_direct(
     let classpath = resolve_classpath_string(manifest);
     let java_exe = find_java(&profile.javaDir)?;
 
-    let game_dir = profile.gameDir.clone().unwrap_or_else(|| minecraft_dir().to_string_lossy().to_string());
+    let game_dir = profile
+        .gameDir
+        .clone()
+        .unwrap_or_else(|| minecraft_dir().to_string_lossy().to_string());
     ensure_windowed_mode(&game_dir);
     let assets_root = assets_dir().to_string_lossy().to_string();
-    let asset_index = manifest.asset_index.as_ref().map(|a| a.id.clone()).unwrap_or_else(|| manifest.assets.clone());
+    let asset_index = manifest
+        .asset_index
+        .as_ref()
+        .map(|a| a.id.clone())
+        .unwrap_or_else(|| manifest.assets.clone());
     let version_name = manifest.id.as_deref().unwrap_or("unknown");
     let version_type = manifest.manifest_type.as_deref().unwrap_or("release");
 
-    let natives_dir = std::env::temp_dir().join(format!("lightning_natives_{}", uuid.replace('-', "").chars().take(8).collect::<String>()));
+    let natives_dir = std::env::temp_dir().join(format!(
+        "lightning_natives_{}",
+        uuid.replace('-', "").chars().take(8).collect::<String>()
+    ));
     let native_jars = find_native_jars(manifest);
     extract_natives(&native_jars, &natives_dir)?;
 
@@ -774,7 +1207,8 @@ pub fn launch_profile_direct(
 
     if let Some(java_args) = &profile.javaArgs {
         let parsed = shell_words_split(java_args);
-        let custom: Vec<&str> = parsed.iter()
+        let custom: Vec<&str> = parsed
+            .iter()
             .map(|s| s.as_str())
             .filter(|s| !s.starts_with("-Djava.library.path"))
             .collect();
@@ -789,7 +1223,10 @@ pub fn launch_profile_direct(
         jvm_args.push("-Xmx2G".to_string());
     }
 
-    jvm_args.push(format!(r"-Djava.library.path={}", natives_dir.to_string_lossy()));
+    jvm_args.push(format!(
+        r"-Djava.library.path={}",
+        natives_dir.to_string_lossy()
+    ));
     jvm_args.push("-cp".to_string());
     let lib_count = classpath.matches(".jar").count();
     jvm_args.push(classpath);
@@ -799,9 +1236,15 @@ pub fn launch_profile_direct(
     if let Some(args_block) = &manifest.arguments {
         for val in &args_block.game {
             if let Some(arg) = resolve_placeholder_arg(
-                val, &username, &access_token, &uuid,
-                &game_dir, &assets_root, &asset_index,
-                version_name, version_type
+                val,
+                &username,
+                &access_token,
+                &uuid,
+                &game_dir,
+                &assets_root,
+                &asset_index,
+                version_name,
+                version_type,
             ) {
                 for a in shell_words_split(&arg) {
                     jvm_args.push(a);
@@ -810,9 +1253,15 @@ pub fn launch_profile_direct(
         }
     } else if let Some(mc_args) = &manifest.minecraft_arguments {
         let parsed = replace_placeholders(
-            mc_args, &username, &access_token, &uuid,
-            &game_dir, &assets_root, &asset_index,
-            version_name, version_type
+            mc_args,
+            &username,
+            &access_token,
+            &uuid,
+            &game_dir,
+            &assets_root,
+            &asset_index,
+            version_name,
+            version_type,
         );
         for arg in shell_words_split(&parsed) {
             jvm_args.push(arg);
@@ -834,7 +1283,8 @@ pub fn launch_profile_direct(
             .append(true)
             .open(&log_path)
             .map_err(|e| format!("Failed to open log for output: {e}"))?;
-        let log_err = log_out.try_clone()
+        let log_err = log_out
+            .try_clone()
             .map_err(|e| format!("Failed to clone log handle: {e}"))?;
 
         let mut child = Command::new(&java_exe)

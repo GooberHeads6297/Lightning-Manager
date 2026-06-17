@@ -21,19 +21,21 @@ struct Palette {
     heading: egui::Color32,
 }
 
-
-
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
-    Mods,
-    Profiles,
-    Launcher,
-    AppData,
+    JavaMods,
+    JavaProfiles,
+    JavaLauncher,
+    JavaData,
+    BedrockPacks,
 }
 
+#[derive(Clone, Copy)]
 enum ConfirmAction {
-    DeleteSelected,
-    ClearAll,
+    DeleteJavaSelected,
+    ClearJavaAll,
+    DeleteBedrockSelected,
+    ClearBedrockAll,
 }
 
 pub struct ModManagerApp {
@@ -44,6 +46,14 @@ pub struct ModManagerApp {
     selected_mods: std::collections::HashSet<String>,
     mods_error: Option<String>,
     delete_status: Option<String>,
+    bedrock_packs: Vec<minecraft::BedrockPackEntry>,
+    selected_bedrock_packs: std::collections::HashSet<String>,
+    bedrock_error: Option<String>,
+    bedrock_status: Option<String>,
+    bedrock_path: String,
+    custom_bedrock_path: String,
+    bedrock_backup_enabled: bool,
+    last_bedrock_backup: Option<String>,
     profiles: minecraft::LauncherProfiles,
     profiles_error: Option<String>,
     profiles_saved: Option<String>,
@@ -67,18 +77,27 @@ impl Default for ModManagerApp {
     fn default() -> Self {
         let mc_path = minecraft::minecraft_dir().to_string_lossy().to_string();
         let md_path = minecraft::mods_dir().to_string_lossy().to_string();
-        let detected_path =
-            minecraft::find_launcher().map(|p| p.to_string_lossy().to_string());
+        let detected_path = minecraft::find_launcher().map(|p| p.to_string_lossy().to_string());
         let config = minecraft::load_config();
 
         let mut app = Self {
-            current_tab: Tab::Mods,
+            current_tab: Tab::JavaMods,
             dark_mode: true,
             show_settings: false,
             mods: Vec::new(),
             selected_mods: std::collections::HashSet::new(),
             mods_error: None,
             delete_status: None,
+            bedrock_packs: Vec::new(),
+            selected_bedrock_packs: std::collections::HashSet::new(),
+            bedrock_error: None,
+            bedrock_status: None,
+            bedrock_path: minecraft::bedrock_dir(Some(&config.custom_bedrock_path))
+                .to_string_lossy()
+                .to_string(),
+            custom_bedrock_path: config.custom_bedrock_path,
+            bedrock_backup_enabled: true,
+            last_bedrock_backup: None,
             profiles: minecraft::LauncherProfiles {
                 profiles: std::collections::HashMap::new(),
                 selectedProfile: None,
@@ -101,6 +120,7 @@ impl Default for ModManagerApp {
             logging_enabled: config.logging_enabled,
         };
         app.refresh_mods();
+        app.refresh_bedrock_packs();
         app.refresh_profiles();
         app
     }
@@ -108,7 +128,11 @@ impl Default for ModManagerApp {
 
 impl ModManagerApp {
     fn palette(&self) -> &'static Palette {
-        if self.dark_mode { &DARK } else { &LIGHT }
+        if self.dark_mode {
+            &DARK
+        } else {
+            &LIGHT
+        }
     }
 
     fn refresh_mods(&mut self) {
@@ -126,22 +150,37 @@ impl ModManagerApp {
         }
     }
 
+    fn refresh_bedrock_packs(&mut self) {
+        self.bedrock_error = None;
+        self.bedrock_path = self.bedrock_path_to_use().to_string_lossy().to_string();
+        match minecraft::list_bedrock_packs(self.custom_bedrock_path_opt()) {
+            Ok(packs) => {
+                self.bedrock_packs = packs;
+                self.selected_bedrock_packs.retain(|id| {
+                    self.bedrock_packs
+                        .iter()
+                        .any(|pack| pack.selection_id() == *id)
+                });
+            }
+            Err(e) => {
+                self.bedrock_error = Some(format!("Failed to list Bedrock packs: {e}"));
+                self.bedrock_packs.clear();
+            }
+        }
+    }
+
     fn refresh_profiles(&mut self) {
         self.profiles_error = None;
         match minecraft::read_profiles() {
             Ok(p) => {
                 self.profiles = p;
                 if self.selected_profile_key.is_none()
-                    || !self.profiles.profiles.contains_key(
-                        self.selected_profile_key.as_deref().unwrap_or(""),
-                    )
+                    || !self
+                        .profiles
+                        .profiles
+                        .contains_key(self.selected_profile_key.as_deref().unwrap_or(""))
                 {
-                    self.selected_profile_key = self
-                        .profiles
-                        .profiles
-                        .keys()
-                        .next()
-                        .cloned();
+                    self.selected_profile_key = self.profiles.profiles.keys().next().cloned();
                 }
             }
             Err(e) => self.profiles_error = Some(e),
@@ -152,20 +191,34 @@ impl ModManagerApp {
         let config = minecraft::AppConfig {
             custom_launcher_path: self.custom_launcher_path.clone(),
             logging_enabled: self.logging_enabled,
+            custom_bedrock_path: self.custom_bedrock_path.clone(),
         };
         minecraft::save_config(&config);
     }
 
+    fn custom_bedrock_path_opt(&self) -> Option<&str> {
+        if self.custom_bedrock_path.trim().is_empty() {
+            None
+        } else {
+            Some(self.custom_bedrock_path.as_str())
+        }
+    }
+
+    fn bedrock_path_to_use(&self) -> std::path::PathBuf {
+        minecraft::bedrock_dir(self.custom_bedrock_path_opt())
+    }
+
     fn do_delete(&mut self) {
         let to_delete: Vec<_> = match &self.confirm_action {
-            Some(ConfirmAction::DeleteSelected) => self
+            Some(ConfirmAction::DeleteJavaSelected) => self
                 .mods
                 .iter()
                 .filter(|m| self.selected_mods.contains(&m.name))
                 .cloned()
                 .collect(),
-            Some(ConfirmAction::ClearAll) => self.mods.clone(),
+            Some(ConfirmAction::ClearJavaAll) => self.mods.clone(),
             None => return,
+            _ => return,
         };
 
         if to_delete.is_empty() {
@@ -220,6 +273,69 @@ impl ModManagerApp {
         self.refresh_mods();
     }
 
+    fn do_bedrock_delete(&mut self) {
+        let to_delete: Vec<_> = match &self.confirm_action {
+            Some(ConfirmAction::DeleteBedrockSelected) => self
+                .bedrock_packs
+                .iter()
+                .filter(|p| self.selected_bedrock_packs.contains(&p.selection_id()))
+                .cloned()
+                .collect(),
+            Some(ConfirmAction::ClearBedrockAll) => self.bedrock_packs.clone(),
+            None => return,
+            _ => return,
+        };
+
+        if to_delete.is_empty() {
+            self.bedrock_status = Some("No Bedrock packs to delete.".to_string());
+            self.show_confirm = false;
+            self.confirm_action = None;
+            return;
+        }
+
+        if self.bedrock_backup_enabled {
+            match minecraft::backup_bedrock_packs(&to_delete, self.custom_bedrock_path_opt()) {
+                Ok(path) => self.last_bedrock_backup = Some(path),
+                Err(e) => {
+                    self.bedrock_status = Some(format!("Backup failed: {e}"));
+                    self.show_confirm = false;
+                    self.confirm_action = None;
+                    return;
+                }
+            }
+        }
+
+        let count = to_delete.len();
+        let mut failed = Vec::new();
+        for pack in &to_delete {
+            if let Err(e) = minecraft::delete_entry_path(&pack.path) {
+                failed.push(format!("{}: {e}", pack.display_name));
+            }
+        }
+
+        if failed.is_empty() {
+            self.bedrock_status = Some(format!(
+                "Deleted {count} Bedrock pack(s).{}",
+                if self.bedrock_backup_enabled {
+                    " Backed up before deletion."
+                } else {
+                    ""
+                }
+            ));
+        } else {
+            self.bedrock_status = Some(format!(
+                "Deleted {} of {count} Bedrock pack(s). Errors: {}",
+                count - failed.len(),
+                failed.join("; ")
+            ));
+        }
+
+        self.selected_bedrock_packs.clear();
+        self.show_confirm = false;
+        self.confirm_action = None;
+        self.refresh_bedrock_packs();
+    }
+
     fn save_profiles(&mut self) {
         self.profiles_saved = None;
         match minecraft::save_profiles(&self.profiles) {
@@ -249,11 +365,7 @@ impl ModManagerApp {
     fn section_header(ui: &mut egui::Ui, p: &Palette, text: &str) {
         ui.horizontal(|ui| {
             ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new(text)
-                    .size(14.0)
-                    .color(p.heading),
-            );
+            ui.label(egui::RichText::new(text).size(14.0).color(p.heading));
         });
         ui.add_space(8.0);
     }
@@ -278,85 +390,113 @@ impl ModManagerApp {
                 .open(&mut window_open)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                Self::section_frame(p).show(ui, |ui| {
-                    Self::section_header(ui, p, "Theme");
-                    ui.horizontal(|ui| {
-                        let icon = if self.dark_mode { "☽ Dark" } else { "☀ Light" };
-                        if ui.button(icon).clicked() {
-                            self.dark_mode = !self.dark_mode;
+                    Self::section_frame(p).show(ui, |ui| {
+                        Self::section_header(ui, p, "Theme");
+                        ui.horizontal(|ui| {
+                            let icon = if self.dark_mode {
+                                "☽ Dark"
+                            } else {
+                                "☀ Light"
+                            };
+                            if ui.button(icon).clicked() {
+                                self.dark_mode = !self.dark_mode;
+                            }
+                        });
+                    });
+
+                    ui.add_space(8.0);
+
+                    Self::section_frame(p).show(ui, |ui| {
+                        Self::section_header(ui, p, "Launcher");
+                        let path = self.launcher_path_to_use();
+                        ui.label(
+                            egui::RichText::new(if path.is_empty() { "None set" } else { &path })
+                                .color(p.text_secondary)
+                                .size(12.0),
+                        );
+                    });
+
+                    ui.add_space(8.0);
+
+                    Self::section_frame(p).show(ui, |ui| {
+                        Self::section_header(ui, p, "Backups");
+                        if ui.button("Clear Java Backups").clicked() {
+                            match minecraft::clear_backups() {
+                                Ok(n) => {
+                                    self.clear_backups_result =
+                                        Some(format!("Removed {n} backup folder(s)."))
+                                }
+                                Err(e) => self.clear_backups_result = Some(format!("Error: {e}")),
+                            }
+                        }
+                        if ui.button("Clear Bedrock Backups").clicked() {
+                            match minecraft::clear_bedrock_backups(self.custom_bedrock_path_opt()) {
+                                Ok(n) => {
+                                    self.clear_backups_result =
+                                        Some(format!("Removed {n} Bedrock backup folder(s)."))
+                                }
+                                Err(e) => self.clear_backups_result = Some(format!("Error: {e}")),
+                            }
+                        }
+                        if let Some(result) = &self.clear_backups_result {
+                            ui.add_space(4.0);
+                            if result.starts_with("Error") {
+                                Self::show_banner(ui, result, p.danger_bg, p.danger);
+                            } else {
+                                Self::show_banner(ui, result, p.success_bg, p.success);
+                            }
+                        }
+                    });
+
+                    ui.add_space(8.0);
+
+                    Self::section_frame(p).show(ui, |ui| {
+                        Self::section_header(ui, p, "Logging");
+                        let prev = self.logging_enabled;
+                        ui.checkbox(
+                            &mut self.logging_enabled,
+                            "Write log files (launch logs, crash reports)",
+                        );
+                        if prev != self.logging_enabled {
+                            self.persist_config();
+                        }
+                        if !self.logging_enabled {
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    "Launch logs and crash reports will not be saved to disk.",
+                                )
+                                .size(11.0)
+                                .color(p.text_muted),
+                            );
+                        }
+                    });
+
+                    ui.add_space(8.0);
+
+                    Self::section_frame(p).show(ui, |ui| {
+                        Self::section_header(ui, p, "Debug Info");
+                        let info = vec![
+                            format!("Version: Release v1.0"),
+                            format!("Dark Mode: {}", self.dark_mode),
+                            format!("Profiles: {}", self.profiles.profiles.len()),
+                            format!("Java Mods: {}", self.mods.len()),
+                            format!("Bedrock Packs: {}", self.bedrock_packs.len()),
+                            format!("Java Directory: {}", self.minecraft_path),
+                            format!("Java Mods Dir: {}", self.mods_path),
+                            format!("Bedrock Directory: {}", self.bedrock_path),
+                            format!("Backups: {}", minecraft::backup_dir().to_string_lossy()),
+                            format!("Launcher: {}", self.launcher_path_to_use()),
+                            format!(
+                                "Selected Profile: {}",
+                                self.selected_profile_key.as_deref().unwrap_or("none")
+                            ),
+                        ];
+                        for line in &info {
+                            ui.label(egui::RichText::new(line).size(11.0).color(p.text_secondary));
                         }
                     });
                 });
-
-                ui.add_space(8.0);
-
-                Self::section_frame(p).show(ui, |ui| {
-                    Self::section_header(ui, p, "Launcher");
-                    let path = self.launcher_path_to_use();
-                    ui.label(egui::RichText::new(
-                        if path.is_empty() { "None set" } else { &path },
-                    ).color(p.text_secondary).size(12.0));
-                });
-
-                ui.add_space(8.0);
-
-                Self::section_frame(p).show(ui, |ui| {
-                    Self::section_header(ui, p, "Backups");
-                    if ui.button("Clear All Backups").clicked() {
-                        match minecraft::clear_backups() {
-                            Ok(n) => self.clear_backups_result = Some(format!("Removed {n} backup folder(s).")),
-                            Err(e) => self.clear_backups_result = Some(format!("Error: {e}")),
-                        }
-                    }
-                    if let Some(result) = &self.clear_backups_result {
-                        ui.add_space(4.0);
-                        if result.starts_with("Error") {
-                            Self::show_banner(ui, result, p.danger_bg, p.danger);
-                        } else {
-                            Self::show_banner(ui, result, p.success_bg, p.success);
-                        }
-                    }
-                });
-
-                ui.add_space(8.0);
-
-                Self::section_frame(p).show(ui, |ui| {
-                    Self::section_header(ui, p, "Logging");
-                    let prev = self.logging_enabled;
-                    ui.checkbox(&mut self.logging_enabled, "Write log files (launch logs, crash reports)");
-                    if prev != self.logging_enabled {
-                        self.persist_config();
-                    }
-                    if !self.logging_enabled {
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new("Launch logs and crash reports will not be saved to disk.")
-                                .size(11.0)
-                                .color(p.text_muted),
-                        );
-                    }
-                });
-
-                ui.add_space(8.0);
-
-                Self::section_frame(p).show(ui, |ui| {
-                    Self::section_header(ui, p, "Debug Info");
-                    let info = vec![
-                        format!("Version: Release v1.0"),
-                        format!("Dark Mode: {}", self.dark_mode),
-                        format!("Profiles: {}", self.profiles.profiles.len()),
-                        format!("Mods: {}", self.mods.len()),
-                        format!("Minecraft: {}", self.minecraft_path),
-                        format!("Mods Dir: {}", self.mods_path),
-                        format!("Backups: {}", minecraft::backup_dir().to_string_lossy()),
-                        format!("Launcher: {}", self.launcher_path_to_use()),
-                        format!("Selected Profile: {}", self.selected_profile_key.as_deref().unwrap_or("none")),
-                    ];
-                    for line in &info {
-                        ui.label(egui::RichText::new(line).size(11.0).color(p.text_secondary));
-                    }
-                });
-            });
             self.show_settings = window_open;
         }
     }
@@ -367,7 +507,11 @@ impl ModManagerApp {
 
         ui.horizontal(|ui| {
             ui.add_space(2.0);
-            ui.label(egui::RichText::new("Mods").size(20.0).strong());
+            ui.label(
+                egui::RichText::new("Minecraft Java Mods")
+                    .size(20.0)
+                    .strong(),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(format!("{} mod(s)", self.mods.len()))
@@ -378,24 +522,23 @@ impl ModManagerApp {
         ui.add_space(4.0);
 
         ui.horizontal(|ui| {
-            let del_btn = egui::Button::new(
-                egui::RichText::new("Delete Selected").color(p.danger),
-            )
-            .fill(p.danger_bg)
-            .min_size(egui::vec2(0.0, 28.0));
-            if ui.add_enabled(has_mods && !self.selected_mods.is_empty(), del_btn).clicked() {
+            let del_btn = egui::Button::new(egui::RichText::new("Delete Selected").color(p.danger))
+                .fill(p.danger_bg)
+                .min_size(egui::vec2(0.0, 28.0));
+            if ui
+                .add_enabled(has_mods && !self.selected_mods.is_empty(), del_btn)
+                .clicked()
+            {
                 self.show_confirm = true;
-                self.confirm_action = Some(ConfirmAction::DeleteSelected);
+                self.confirm_action = Some(ConfirmAction::DeleteJavaSelected);
             }
 
-            let clear_btn = egui::Button::new(
-                egui::RichText::new("Clear All").color(p.danger),
-            )
-            .fill(p.danger_bg)
-            .min_size(egui::vec2(0.0, 28.0));
+            let clear_btn = egui::Button::new(egui::RichText::new("Clear All").color(p.danger))
+                .fill(p.danger_bg)
+                .min_size(egui::vec2(0.0, 28.0));
             if ui.add_enabled(has_mods, clear_btn).clicked() {
                 self.show_confirm = true;
-                self.confirm_action = Some(ConfirmAction::ClearAll);
+                self.confirm_action = Some(ConfirmAction::ClearJavaAll);
             }
 
             if ui.button("Open Mods Folder").clicked() {
@@ -460,28 +603,225 @@ impl ModManagerApp {
                             .inner_margin(egui::Margin::symmetric(10, 6))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    let is_selected =
-                                        self.selected_mods.contains(&mod_entry.name);
+                                    let is_selected = self.selected_mods.contains(&mod_entry.name);
                                     let mut checked = is_selected;
                                     ui.checkbox(&mut checked, "");
                                     if checked != is_selected {
                                         if checked {
-                                            self.selected_mods
-                                                .insert(mod_entry.name.clone());
+                                            self.selected_mods.insert(mod_entry.name.clone());
                                         } else {
-                                            self.selected_mods
-                                                .remove(&mod_entry.name);
+                                            self.selected_mods.remove(&mod_entry.name);
                                         }
                                     }
-                                    ui.label(
-                                        egui::RichText::new(&mod_entry.name).size(13.0),
-                                    );
+                                    ui.label(egui::RichText::new(&mod_entry.name).size(13.0));
                                     ui.with_layout(
-                                        egui::Layout::right_to_left(
-                                            egui::Align::Center,
-                                        ),
+                                        egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             let size_kb = mod_entry.size / 1024;
+                                            let color = if size_kb > 5000 {
+                                                p.warning
+                                            } else {
+                                                p.text_secondary
+                                            };
+                                            ui.label(
+                                                egui::RichText::new(format!("{size_kb} KB"))
+                                                    .color(color)
+                                                    .size(11.0),
+                                            );
+                                        },
+                                    );
+                                });
+                            });
+                        ui.add_space(2.0);
+                    }
+                });
+        }
+    }
+
+    fn show_bedrock_packs_tab(&mut self, ui: &mut egui::Ui) {
+        let p = self.palette();
+        let has_packs = !self.bedrock_packs.is_empty();
+
+        ui.horizontal(|ui| {
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new("Minecraft Bedrock").size(20.0).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{} pack(s)", self.bedrock_packs.len()))
+                        .color(p.text_secondary),
+                );
+            });
+        });
+        ui.add_space(4.0);
+
+        Self::section_frame(p).show(ui, |ui| {
+            Self::section_header(ui, p, "Bedrock Install");
+            ui.label(
+                egui::RichText::new(&self.bedrock_path)
+                    .size(12.0)
+                    .color(p.text_secondary),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Open Bedrock Data").clicked() {
+                    let _ = minecraft::open_bedrock_folder(self.custom_bedrock_path_opt());
+                }
+                if ui.button("Browse").clicked() {
+                    if let Some(path) =
+                        minecraft::pick_folder_dialog("Select Bedrock com.mojang Folder")
+                    {
+                        self.custom_bedrock_path = path;
+                        self.bedrock_path =
+                            self.bedrock_path_to_use().to_string_lossy().to_string();
+                        self.persist_config();
+                        self.refresh_bedrock_packs();
+                    }
+                }
+                if !self.custom_bedrock_path.is_empty() && ui.button("Use Detected").clicked() {
+                    self.custom_bedrock_path.clear();
+                    self.bedrock_path = self.bedrock_path_to_use().to_string_lossy().to_string();
+                    self.persist_config();
+                    self.refresh_bedrock_packs();
+                }
+            });
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Bedrock add-ons are managed separately from Java .jar mods.")
+                    .size(11.0)
+                    .color(p.text_muted),
+            );
+        });
+
+        ui.add_space(8.0);
+
+        ui.horizontal(|ui| {
+            let del_btn = egui::Button::new(egui::RichText::new("Delete Selected").color(p.danger))
+                .fill(p.danger_bg)
+                .min_size(egui::vec2(0.0, 28.0));
+            if ui
+                .add_enabled(
+                    has_packs && !self.selected_bedrock_packs.is_empty(),
+                    del_btn,
+                )
+                .clicked()
+            {
+                self.show_confirm = true;
+                self.confirm_action = Some(ConfirmAction::DeleteBedrockSelected);
+            }
+
+            let clear_btn = egui::Button::new(egui::RichText::new("Clear All").color(p.danger))
+                .fill(p.danger_bg)
+                .min_size(egui::vec2(0.0, 28.0));
+            if ui.add_enabled(has_packs, clear_btn).clicked() {
+                self.show_confirm = true;
+                self.confirm_action = Some(ConfirmAction::ClearBedrockAll);
+            }
+
+            if ui.button("Open Behavior Packs").clicked() {
+                let _ =
+                    minecraft::open_bedrock_behavior_packs_folder(self.custom_bedrock_path_opt());
+            }
+            if ui.button("Open Resource Packs").clicked() {
+                let _ =
+                    minecraft::open_bedrock_resource_packs_folder(self.custom_bedrock_path_opt());
+            }
+            if ui.button("Refresh").clicked() {
+                self.refresh_bedrock_packs();
+            }
+        });
+
+        ui.add_space(6.0);
+
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut self.bedrock_backup_enabled,
+                "Backup packs before deletion",
+            );
+            if let Some(last) = &self.last_bedrock_backup {
+                if ui.button("Open Backup").clicked() {
+                    let _ = minecraft::open_folder(&std::path::PathBuf::from(last));
+                }
+            }
+        });
+
+        if let Some(status) = &self.bedrock_status.clone() {
+            ui.add_space(4.0);
+            if status.starts_with("Backup failed") || status.contains("Errors:") {
+                Self::show_banner(ui, status, p.danger_bg, p.danger);
+            } else {
+                Self::show_banner(ui, status, p.success_bg, p.success);
+            }
+        }
+
+        if let Some(error) = &self.bedrock_error {
+            ui.add_space(4.0);
+            Self::show_banner(ui, error, p.danger_bg, p.danger);
+        }
+
+        ui.add_space(6.0);
+
+        if self.bedrock_packs.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(42.0);
+                ui.label(
+                    egui::RichText::new("No Bedrock packs found")
+                        .size(16.0)
+                        .color(p.text_secondary),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(&self.bedrock_path)
+                        .color(p.text_muted)
+                        .size(12.0),
+                );
+                ui.add_space(8.0);
+                if ui.button("Open Bedrock Data").clicked() {
+                    let _ = minecraft::open_bedrock_folder(self.custom_bedrock_path_opt());
+                }
+            });
+        } else {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    for (i, pack) in self.bedrock_packs.clone().iter().enumerate() {
+                        let bg = if i % 2 == 0 { p.card } else { p.card_alt };
+                        egui::Frame::default()
+                            .fill(bg)
+                            .corner_radius(6)
+                            .inner_margin(egui::Margin::symmetric(10, 6))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let id = pack.selection_id();
+                                    let is_selected = self.selected_bedrock_packs.contains(&id);
+                                    let mut checked = is_selected;
+                                    ui.checkbox(&mut checked, "");
+                                    if checked != is_selected {
+                                        if checked {
+                                            self.selected_bedrock_packs.insert(id);
+                                        } else {
+                                            self.selected_bedrock_packs.remove(&id);
+                                        }
+                                    }
+
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(&pack.display_name).size(13.0),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{} | {}",
+                                                pack.kind.label(),
+                                                if pack.is_folder { "folder" } else { "file" }
+                                            ))
+                                            .size(11.0)
+                                            .color(p.text_muted),
+                                        );
+                                    });
+
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let size_kb = pack.size / 1024;
                                             let color = if size_kb > 5000 {
                                                 p.warning
                                             } else {
@@ -526,7 +866,7 @@ impl ModManagerApp {
 
         ui.horizontal(|ui| {
             ui.add_space(2.0);
-            ui.label(egui::RichText::new("Profiles").size(20.0).strong());
+            ui.label(egui::RichText::new("Java Profiles").size(20.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Save Changes").clicked() {
                     self.save_profiles();
@@ -553,9 +893,7 @@ impl ModManagerApp {
         }
 
         ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("Profile").color(p.text_secondary),
-            );
+            ui.label(egui::RichText::new("Profile").color(p.text_secondary));
             let selected_label = match &self.selected_profile_key {
                 Some(k) => match self.profiles.profiles.get(k) {
                     Some(prof) if !prof.name.is_empty() => prof.name.as_str(),
@@ -579,12 +917,8 @@ impl ModManagerApp {
                                 }
                             })
                             .unwrap_or_else(|| key.clone());
-                        let is_selected =
-                            self.selected_profile_key.as_deref() == Some(key);
-                        if ui
-                            .selectable_label(is_selected, &display)
-                            .clicked()
-                        {
+                        let is_selected = self.selected_profile_key.as_deref() == Some(key);
+                        if ui.selectable_label(is_selected, &display).clicked() {
                             self.selected_profile_key = Some(key.clone());
                         }
                     }
@@ -773,7 +1107,7 @@ impl ModManagerApp {
         let p = self.palette();
         ui.horizontal(|ui| {
             ui.add_space(2.0);
-            ui.label(egui::RichText::new("Launcher").size(20.0).strong());
+            ui.label(egui::RichText::new("Java Launcher").size(20.0).strong());
         });
         ui.add_space(4.0);
 
@@ -795,8 +1129,7 @@ impl ModManagerApp {
             let path = self.launcher_path_to_use();
             match minecraft::launch_minecraft_with_path(&path) {
                 Ok(()) => {
-                    self.launch_status =
-                        Some("Launcher started successfully.".to_string());
+                    self.launch_status = Some("Launcher started successfully.".to_string());
                 }
                 Err(e) => {
                     self.launch_error = Some(e);
@@ -938,7 +1271,7 @@ impl ModManagerApp {
         let p = self.palette();
         ui.horizontal(|ui| {
             ui.add_space(2.0);
-            ui.label(egui::RichText::new("AppData").size(20.0).strong());
+            ui.label(egui::RichText::new("Java AppData").size(20.0).strong());
         });
         ui.add_space(4.0);
 
@@ -955,10 +1288,8 @@ impl ModManagerApp {
             ui.horizontal(|ui| {
                 if ui
                     .add(
-                        egui::Button::new(
-                            egui::RichText::new("Open .minecraft").size(14.0),
-                        )
-                        .min_size(egui::vec2(180.0, 36.0)),
+                        egui::Button::new(egui::RichText::new("Open .minecraft").size(14.0))
+                            .min_size(egui::vec2(180.0, 36.0)),
                     )
                     .clicked()
                 {
@@ -966,10 +1297,8 @@ impl ModManagerApp {
                 }
                 if ui
                     .add(
-                        egui::Button::new(
-                            egui::RichText::new("Open Mods").size(14.0),
-                        )
-                        .min_size(egui::vec2(180.0, 36.0)),
+                        egui::Button::new(egui::RichText::new("Open Mods").size(14.0))
+                            .min_size(egui::vec2(180.0, 36.0)),
                     )
                     .clicked()
                 {
@@ -993,10 +1322,8 @@ impl ModManagerApp {
 
             if ui
                 .add(
-                    egui::Button::new(
-                        egui::RichText::new("Open Backup Folder").size(14.0),
-                    )
-                    .min_size(egui::vec2(200.0, 34.0)),
+                    egui::Button::new(egui::RichText::new("Open Backup Folder").size(14.0))
+                        .min_size(egui::vec2(200.0, 34.0)),
                 )
                 .clicked()
             {
@@ -1108,33 +1435,60 @@ impl eframe::App for ModManagerApp {
         });
 
         if self.show_confirm {
-            let mod_list = match &self.confirm_action {
-                Some(ConfirmAction::DeleteSelected) => self
+            let item_list = match &self.confirm_action {
+                Some(ConfirmAction::DeleteJavaSelected) => self
                     .mods
                     .iter()
                     .filter(|m| self.selected_mods.contains(&m.name))
                     .map(|m| m.name.clone())
                     .collect::<Vec<_>>(),
-                Some(ConfirmAction::ClearAll) => {
+                Some(ConfirmAction::ClearJavaAll) => {
                     self.mods.iter().map(|m| m.name.clone()).collect()
                 }
+                Some(ConfirmAction::DeleteBedrockSelected) => self
+                    .bedrock_packs
+                    .iter()
+                    .filter(|p| self.selected_bedrock_packs.contains(&p.selection_id()))
+                    .map(|p| format!("{} ({})", p.display_name, p.kind.label()))
+                    .collect::<Vec<_>>(),
+                Some(ConfirmAction::ClearBedrockAll) => self
+                    .bedrock_packs
+                    .iter()
+                    .map(|p| format!("{} ({})", p.display_name, p.kind.label()))
+                    .collect::<Vec<_>>(),
                 None => Vec::new(),
             };
 
             let action_label = match &self.confirm_action {
-                Some(ConfirmAction::DeleteSelected) => {
-                    format!("Delete {} selected mod(s)?", mod_list.len())
+                Some(ConfirmAction::DeleteJavaSelected) => {
+                    format!("Delete {} selected Java mod(s)?", item_list.len())
                 }
-                Some(ConfirmAction::ClearAll) => {
-                    format!("Delete all {} mod(s)?", mod_list.len())
+                Some(ConfirmAction::ClearJavaAll) => {
+                    format!("Delete all {} Java mod(s)?", item_list.len())
+                }
+                Some(ConfirmAction::DeleteBedrockSelected) => {
+                    format!("Delete {} selected Bedrock pack(s)?", item_list.len())
+                }
+                Some(ConfirmAction::ClearBedrockAll) => {
+                    format!("Delete all {} Bedrock pack(s)?", item_list.len())
                 }
                 None => String::new(),
             };
 
-            let warning = if self.backup_enabled {
-                "Mods will be backed up before deletion."
+            let is_bedrock_delete = matches!(
+                self.confirm_action,
+                Some(ConfirmAction::DeleteBedrockSelected | ConfirmAction::ClearBedrockAll)
+            );
+            let backup_enabled = if is_bedrock_delete {
+                self.bedrock_backup_enabled
             } else {
-                "BACKUP IS DISABLED \u{2014} mods will be permanently deleted."
+                self.backup_enabled
+            };
+            let item_label = if is_bedrock_delete { "packs" } else { "mods" };
+            let warning = if backup_enabled {
+                format!("{item_label} will be backed up before deletion.")
+            } else {
+                format!("BACKUP IS DISABLED - {item_label} will be permanently deleted.")
             };
 
             egui::Window::new("Confirm Deletion")
@@ -1154,20 +1508,20 @@ impl eframe::App for ModManagerApp {
                         ui.label(
                             egui::RichText::new(warning)
                                 .size(12.0)
-                                .color(if self.backup_enabled {
-                                    p.success
-                                } else {
-                                    p.danger
-                                }),
+                                .color(if backup_enabled { p.success } else { p.danger }),
                         );
 
-                        if !mod_list.is_empty() {
+                        if !item_list.is_empty() {
                             ui.add_space(8.0);
-                            ui.label("Mods to delete:");
+                            ui.label(if is_bedrock_delete {
+                                "Bedrock packs to delete:"
+                            } else {
+                                "Java mods to delete:"
+                            });
                             egui::ScrollArea::vertical()
                                 .max_height(150.0)
                                 .show(ui, |ui| {
-                                    for name in &mod_list {
+                                    for name in &item_list {
                                         ui.label(
                                             egui::RichText::new(name)
                                                 .size(11.0)
@@ -1182,8 +1536,7 @@ impl eframe::App for ModManagerApp {
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        egui::RichText::new("Cancel")
-                                            .color(egui::Color32::WHITE),
+                                        egui::RichText::new("Cancel").color(egui::Color32::WHITE),
                                     )
                                     .min_size(egui::vec2(100.0, 30.0)),
                                 )
@@ -1196,15 +1549,18 @@ impl eframe::App for ModManagerApp {
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        egui::RichText::new("Delete")
-                                            .color(egui::Color32::WHITE),
+                                        egui::RichText::new("Delete").color(egui::Color32::WHITE),
                                     )
                                     .fill(p.danger_bg)
                                     .min_size(egui::vec2(100.0, 30.0)),
                                 )
                                 .clicked()
                             {
-                                self.do_delete();
+                                if is_bedrock_delete {
+                                    self.do_bedrock_delete();
+                                } else {
+                                    self.do_delete();
+                                }
                             }
                         });
                     });
@@ -1224,20 +1580,17 @@ impl eframe::App for ModManagerApp {
                         .color(p.heading)
                         .size(20.0),
                 );
-                ui.with_layout(
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| {
-                        let theme_icon = if self.dark_mode { "☀" } else { "☽" };
-                        if ui.button("⚙").clicked() {
-                            self.show_settings = !self.show_settings;
-                        }
-                        ui.add_space(2.0);
-                        if ui.button(theme_icon).clicked() {
-                            self.dark_mode = !self.dark_mode;
-                        }
-                        ui.add_space(4.0);
-                    },
-                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let theme_icon = if self.dark_mode { "☀" } else { "☽" };
+                    if ui.button("⚙").clicked() {
+                        self.show_settings = !self.show_settings;
+                    }
+                    ui.add_space(2.0);
+                    if ui.button(theme_icon).clicked() {
+                        self.dark_mode = !self.dark_mode;
+                    }
+                    ui.add_space(4.0);
+                });
             });
 
             ui.add_space(6.0);
@@ -1245,10 +1598,11 @@ impl eframe::App for ModManagerApp {
             ui.horizontal(|ui| {
                 ui.add_space(4.0);
                 let tabs = [
-                    (Tab::Mods, "Mods"),
-                    (Tab::Profiles, "Profiles"),
-                    (Tab::Launcher, "Launcher"),
-                    (Tab::AppData, "AppData"),
+                    (Tab::JavaMods, "Java Mods"),
+                    (Tab::JavaProfiles, "Java Profiles"),
+                    (Tab::JavaLauncher, "Java Launcher"),
+                    (Tab::JavaData, "Java Data"),
+                    (Tab::BedrockPacks, "Bedrock Packs"),
                 ];
                 for (tab, label) in &tabs {
                     let is_selected = self.current_tab == *tab;
@@ -1273,10 +1627,11 @@ impl eframe::App for ModManagerApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(4.0);
             match self.current_tab {
-                Tab::Mods => self.show_mods_tab(ui),
-                Tab::Profiles => self.show_profiles_tab(ui),
-                Tab::Launcher => self.show_launcher_tab(ui),
-                Tab::AppData => self.show_appdata_tab(ui),
+                Tab::JavaMods => self.show_mods_tab(ui),
+                Tab::JavaProfiles => self.show_profiles_tab(ui),
+                Tab::JavaLauncher => self.show_launcher_tab(ui),
+                Tab::JavaData => self.show_appdata_tab(ui),
+                Tab::BedrockPacks => self.show_bedrock_packs_tab(ui),
             }
         });
     }
