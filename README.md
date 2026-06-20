@@ -39,6 +39,11 @@ _________________________________________________
 
 This is a simple and lightweight mod manager for Minecraft: Java Edition that gives the user capability to manage, delete, or backup their mods. All mods and trademark properties that are shown are created by their respective owners. 
 
+### Support for Minecraft Bedrock Edition (Minecraft For Windows)
+
+<img width="517" height="292" alt="image" src="https://github.com/user-attachments/assets/55cf9cda-e41c-4a1f-a78c-254b12637a9e" />
+
+
 ### Requirements:
 
 * Ensure Minecraft Launcher is installed properly
